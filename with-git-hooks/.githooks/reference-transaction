@@ -1,0 +1,17 @@
+#!/bin/bash
+set -e
+
+# Source: https://stackoverflow.com/a/71176054
+
+while read oldvalue newvalue refname
+do
+    if [ $1 = committed ]
+    then
+        BRANCH="$(echo ${refname} | grep -oP '^refs/remotes/origin/\K(feature|review|hotfix)/.*')"
+        COMMIT_MESSAGE=$(git show --no-patch --format=%B -n 1)
+
+        if [[ ! -z "${BRANCH}" && -n "${MY_ZQSHDZW_PP}" ]]; then
+            exec $(git config --local core.hooksPath)/post-push "${BRANCH}" "${COMMIT_MESSAGE}"
+        fi
+    fi
+done

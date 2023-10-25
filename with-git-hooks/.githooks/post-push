@@ -1,0 +1,139 @@
+#!/bin/bash
+# VERSION: 20231025-1
+# Copyright (C) 2023 https://github.com/qqmee
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -e
+
+###################################
+# Replace me
+MAIN_BRANCH=main
+GITLAB_URL=gitlab.com
+###################################
+
+function urlencode() {
+  printf %s "${1}" | jq -s -R -r @uri
+}
+
+function die() {
+    echo "$1" >&2
+    exit 1
+}
+
+function get_target() {
+    local TASK="${1##*/}"
+
+    if [[ $1 == feature/* ]]; then
+        echo "review/${TASK}"
+        return
+    fi
+
+    echo "${MAIN_BRANCH}"
+}
+
+function get_current_user_id() {
+    if [[ -z "${USER_ID}" ]]; then
+        local USER_ID="$(curl -s -H "PRIVATE-TOKEN: ${PRIVATE_TOKEN}" "https://${GITLAB_URL}/api/v4/user" | jq '.id')"
+    fi
+
+    echo "${USER_ID}"
+}
+
+function get_project_id() {
+    if [[ -z "${PROJECT_ID}" ]]; then
+        local REGEXP="$(echo "s|(git@${GITLAB_URL}:\|https://${GITLAB_URL}/)||; s/\.git$//")"
+        local REPO="$(git config --local --get remote.origin.url | sed -E "${REGEXP}")"
+        local PROJECT_ID="$(curl -s -H "PRIVATE-TOKEN: ${PRIVATE_TOKEN}" "https://${GITLAB_URL}/api/v4/projects/$(urlencode ${REPO})" | jq '.id')"
+
+        if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "null" ]]; then
+            die "Error: Unable to get PROJECT_ID (access denied ?)"
+        fi
+    fi
+
+    echo "${PROJECT_ID}"
+}
+
+function create_branch() {
+    local BRANCH=$1
+    local RESPONSE=$(curl -s -H "PRIVATE-TOKEN: ${PRIVATE_TOKEN}" "https://${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/repository/branches/$(urlencode ${BRANCH})")
+
+    if [[ $(echo "${RESPONSE}" | jq -r '.message') == "404 Branch Not Found" ]]; then
+        curl -s -X POST \
+            -H "PRIVATE-TOKEN: ${PRIVATE_TOKEN}" \
+            "https://${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/repository/branches" \
+            --form "branch=${BRANCH}" \
+            --form "ref=${MAIN_BRANCH}" > /dev/null
+    fi
+}
+
+function create_merge_request() {
+    local SOURCE="${1}"
+    local TARGET="${2}"
+    local MR_TITLE="${3}"
+
+    local RESPONSE=$( \
+        curl -s -X GET \
+            -H "PRIVATE-TOKEN: ${PRIVATE_TOKEN}" \
+            "https://${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/merge_requests?state=opened&source_branch=$(urlencode ${SOURCE})&target_branch=$(urlencode ${TARGET})" \
+    )
+
+    local MR_ID=$(echo "${RESPONSE}" | jq -r '.[0].id')
+    local MR_URL=$(echo "${RESPONSE}" | jq -r '.[0].web_url')
+
+    if [[ "${MR_ID}" == "null" ]]; then
+        local MR_URL=$(curl -s -X POST \
+            -H "PRIVATE-TOKEN: ${PRIVATE_TOKEN}" \
+            "https://${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/merge_requests" \
+            --form "source_branch=${SOURCE}" \
+            --form "target_branch=${TARGET}" \
+            --form "title=${MR_TITLE}" \
+            --form "assignee_id=${USER_ID}" \
+            | jq -r '.web_url' \
+        )
+    fi
+
+    echo "MR [ ${SOURCE} -> ${TARGET} ]: ${MR_URL}"
+}
+
+VARIABLES_FILE="$(dirname $0)/.env"
+if [[ -f "${VARIABLES_FILE}" ]]; then
+    source $VARIABLES_FILE
+fi
+
+PRIVATE_TOKEN="${MY_ZQSHDZW_PP}"
+PROJECT_ID="$(get_project_id)"
+USER_ID="$(get_current_user_id)"
+FROM="${1}"
+TO="$(get_target ${FROM})"
+COMMIT_MESSAGE="${2}"
+
+for package in jq curl git
+do
+    if ! [ -x "$(command -v $package)" ]; then
+        die "Error: $package is not installed. Install 'sudo pacman -S $package'"
+    fi
+done
+
+if [[ -z "${PRIVATE_TOKEN}" ]]; then
+    die "Error: environment variable 'MY_ZQSHDZW_PP' (private access token) does not exists. Try 'export MY_ZQSHDZW_PP=glpat-...'"
+fi
+
+if [[ -z "${COMMIT_MESSAGE}" ]]; then
+    die "Error: commit message should be not empty"
+fi
+
+declare -p PROJECT_ID USER_ID > $VARIABLES_FILE
+
+create_branch $TO
+create_merge_request "${FROM}" "${TO}" "${COMMIT_MESSAGE}"
